@@ -290,12 +290,19 @@ class POSServerGUI:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         log_message = f"{timestamp} {message}\n"
         
-        # Добавление в GUI
-        self.log_text.insert(END, log_message)
-        self.log_text.see(END)
+        # Добавление в GUI (с проверкой на существование виджета)
+        try:
+            if hasattr(self, 'log_text') and self.log_text.winfo_exists():
+                self.log_text.insert(END, log_message)
+                self.log_text.see(END)
+        except:
+            pass  # GUI может быть не готов
         
-        # Печать в консоль
-        print(log_message.strip())
+        # Печать в консоль (только если консоль доступна)
+        try:
+            print(log_message.strip())
+        except:
+            pass  # В EXE без консоли может не работать
         
         # Сохранение в файл
         try:
