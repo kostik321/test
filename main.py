@@ -10,6 +10,8 @@ from datetime import datetime
 from tkinter import *
 from tkinter import ttk, messagebox, scrolledtext
 import tkinter.font as tkFont
+
+# Проверка доступности системного трея
 try:
     import pystray
     from pystray import MenuItem as item
@@ -45,7 +47,7 @@ class POSServerGUI:
     def __init__(self):
         self.root = Tk()
         self.root.title("UniPro POS Server v25")
-        self.root.geometry("800x600")
+        self.root.geometry("900x700")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Переменные для портов
@@ -121,6 +123,28 @@ class POSServerGUI:
         self.stop_button.pack(side=LEFT, padx=5)
         
         ttk.Button(control_frame, text="Сохранить настройки", command=self.save_config).pack(side=LEFT, padx=5)
+        ttk.Button(control_frame, text="Тестировать UDP", command=self.test_udp).pack(side=LEFT, padx=5)
+        
+        # Информационная панель
+        info_frame = ttk.LabelFrame(settings_frame, text="Статус сервера", padding=10)
+        info_frame.pack(fill=X, pady=5)
+        
+        self.server_status = StringVar(value="Остановлен")
+        self.active_transaction = StringVar(value="Нет")
+        self.cart_items = StringVar(value="0")
+        self.total_amount = StringVar(value="0.00 UAH")
+        
+        ttk.Label(info_frame, text="Статус:").grid(row=0, column=0, sticky=W)
+        ttk.Label(info_frame, textvariable=self.server_status).grid(row=0, column=1, sticky=W, padx=10)
+        
+        ttk.Label(info_frame, text="Активная транзакция:").grid(row=1, column=0, sticky=W)
+        ttk.Label(info_frame, textvariable=self.active_transaction).grid(row=1, column=1, sticky=W, padx=10)
+        
+        ttk.Label(info_frame, text="Товаров в корзине:").grid(row=2, column=0, sticky=W)
+        ttk.Label(info_frame, textvariable=self.cart_items).grid(row=2, column=1, sticky=W, padx=10)
+        
+        ttk.Label(info_frame, text="Сумма:").grid(row=3, column=0, sticky=W)
+        ttk.Label(info_frame, textvariable=self.total_amount).grid(row=3, column=1, sticky=W, padx=10)
         
         # Вкладка логов
         log_frame = ttk.Frame(notebook)
@@ -141,6 +165,21 @@ class POSServerGUI:
         self.status_var = StringVar(value="Сервер остановлен")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=SUNKEN)
         status_bar.pack(side=BOTTOM, fill=X)
+        
+        # Запуск обновления статуса
+        self.update_status()
+    
+    def update_status(self):
+        """Обновление статуса в реальном времени"""
+        global server_running, active, products, total, clients
+        
+        self.server_status.set("Работает" if server_running else "Остановлен")
+        self.active_transaction.set("Да" if active else "Нет")
+        self.cart_items.set(str(len(products)))
+        self.total_amount.set(f"{total:.2f} UAH")
+        
+        # Повторный вызов через 1 секунду
+        self.root.after(1000, self.update_status)
     
     def setup_tray(self):
         if not TRAY_AVAILABLE:
@@ -168,6 +207,7 @@ class POSServerGUI:
         self.tray_icon = pystray.Icon("pos_server", create_image(), "UniPro POS Server", menu)
     
     def start_server(self):
+        global server_running
         if server_running:
             return
             
@@ -185,7 +225,6 @@ class POSServerGUI:
             threading.Thread(target=self.tcp_server, args=(tcp_status,), daemon=True).start()
             threading.Thread(target=self.client_server, args=(tcp_client,), daemon=True).start()
             
-            global server_running
             server_running = True
             
             self.log(f"Сервер запущен на портах: TCP {tcp_status}, UDP {udp_json}, TCP Client {tcp_client}")
@@ -221,6 +260,31 @@ class POSServerGUI:
         
         self.start_button.config(state=NORMAL)
         self.stop_button.config(state=DISABLED)
+    
+    def test_udp(self):
+        """Отправка тестового UDP сообщения"""
+        test_data = {
+            "cmd": {"cmd": ""},
+            "goods": [
+                {
+                    "fPName": "Тестовый товар",
+                    "fPrice": 15.50,
+                    "fQtty": 1,
+                    "fSum": 15.50
+                }
+            ],
+            "sum": {"sum": 15.50}
+        }
+        
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test_socket.sendto(json.dumps(test_data).encode(), ('localhost', int(self.udp_json_port.get())))
+            test_socket.close()
+            self.log("Тестовое UDP сообщение отправлено")
+            messagebox.showinfo("Тест", "Тестовое UDP сообщение отправлено")
+        except Exception as e:
+            self.log(f"Ошибка отправки тестового сообщения: {e}")
+            messagebox.showerror("Ошибка", f"Ошибка отправки тестового сообщения: {e}")
     
     def log(self, message):
         timestamp = datetime.now().strftime("[%H:%M:%S]")
