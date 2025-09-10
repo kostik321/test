@@ -1,0 +1,140 @@
+name: Build UniPro POS Server EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+    
+    - name: Fix encoding in main.py
+      run: |
+        # Fixing encoding issues for Windows build
+        python -c "
+        with open('main.py', 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        
+        # Replace problematic Unicode characters
+        content = content.replace('Ð', 'О')
+        content = content.replace('Ñ', 'п')
+        content = content.replace('†', 'І')
+        content = content.replace('®', 'р')
+        content = content.replace('Ð', 'А')
+        
+        # Fix log file path for Windows
+        content = content.replace('/app/tcp_4000.log', './tcp_4000.log')
+        
+        with open('main.py', 'w', encoding='utf-8') as f:
+            f.write(content)
+        "
+    
+    - name: Create PyInstaller spec file
+      run: |
+        echo "# -*- mode: python ; coding: utf-8 -*-
+        
+        a = Analysis(
+            ['main.py'],
+            pathex=[],
+            binaries=[],
+            datas=[
+                ('config.py', '.'),
+                ('data_processor.py', '.'),
+                ('receipt_formatter.py', '.'),
+            ],
+            hiddenimports=[],
+            hookspath=[],
+            hooksconfig={},
+            runtime_hooks=[],
+            excludes=[],
+            noarchive=False,
+        )
+        
+        pyz = PYZ(a.pure)
+        
+        exe = EXE(
+            pyz,
+            a.scripts,
+            a.binaries,
+            a.datas,
+            [],
+            name='UniPro_POS_Server_GUI',
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=True,
+            upx_exclude=[],
+            runtime_tmpdir=None,
+            console=True,
+            disable_windowed_traceback=False,
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+            version='version_info.txt',
+            icon='icon.ico',
+        )" > pos_server.spec
+    
+    - name: Build EXE with PyInstaller
+      run: |
+        pyinstaller pos_server.spec
+    
+    - name: Test EXE exists
+      run: |
+        if (Test-Path "dist/UniPro_POS_Server.exe") {
+            Write-Host "✅ EXE file created successfully!"
+            Get-ChildItem "dist/UniPro_POS_Server.exe" | Format-List
+        } else {
+            Write-Host "❌ EXE file not found!"
+            exit 1
+        }
+    
+    - name: Upload EXE artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: UniPro_POS_Server_Windows
+        path: dist/UniPro_POS_Server.exe
+        retention-days: 30
+    
+    - name: Create Release (if tagged)
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/UniPro_POS_Server.exe
+        name: UniPro POS Server ${{ github.ref_name }}
+        body: |
+          ## UniPro POS Server ${{ github.ref_name }}
+          
+          ### Функции:
+          - TCP сервер на порту 4000 для статусов принтера
+          - UDP сервер на порту 4001 для JSON данных  
+          - TCP сервер на порту 4002 для клиентских подключений
+          - Логирование всех TCP соединений
+          - Обработка продаж, возвратов и отмены операций
+          
+          ### Установка:
+          1. Скачайте UniPro_POS_Server.exe
+          2. Запустите от имени администратора
+          3. Убедитесь что порты 4000, 4001, 4002 не заблокированы
+          
+          ### Логи:
+          Файл tcp_4000.log создается в папке с программой
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
