@@ -23,32 +23,29 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
+        pip install pyinstaller pystray Pillow
     
     - name: Fix encoding in main.py
       run: |
-        # Fixing encoding issues for Windows build
-        python -c "
-        with open('main.py', 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
+        # Read and fix encoding issues
+        $content = Get-Content -Path 'main.py' -Encoding UTF8 -Raw
         
-        # Replace problematic Unicode characters
-        content = content.replace('Ð', 'О')
-        content = content.replace('Ñ', 'п')
-        content = content.replace('†', 'І')
-        content = content.replace('®', 'р')
-        content = content.replace('Ð', 'А')
+        # Replace problematic characters
+        $content = $content -replace 'Ð', 'О'
+        $content = $content -replace 'Ñ', 'п'
+        $content = $content -replace '†', 'І'
+        $content = $content -replace '®', 'р'
         
         # Fix log file path for Windows
-        content = content.replace('/app/tcp_4000.log', './tcp_4000.log')
+        $content = $content -replace '/app/tcp_4000\.log', './tcp_4000.log'
         
-        with open('main.py', 'w', encoding='utf-8') as f:
-            f.write(content)
-        "
+        # Write back
+        Set-Content -Path 'main.py' -Value $content -Encoding UTF8
     
     - name: Create PyInstaller spec file
       run: |
-        echo "# -*- mode: python ; coding: utf-8 -*-
+        @'
+        # -*- mode: python ; coding: utf-8 -*-
         
         a = Analysis(
             ['main.py'],
@@ -59,7 +56,7 @@ jobs:
                 ('data_processor.py', '.'),
                 ('receipt_formatter.py', '.'),
             ],
-            hiddenimports=[],
+            hiddenimports=['pystray', 'PIL', 'PIL._tkinter_finder'],
             hookspath=[],
             hooksconfig={},
             runtime_hooks=[],
@@ -88,9 +85,8 @@ jobs:
             target_arch=None,
             codesign_identity=None,
             entitlements_file=None,
-            version='version_info.txt',
-            icon='icon.ico',
-        )" > pos_server.spec
+        )
+        '@ | Out-File -FilePath 'pos_server.spec' -Encoding UTF8
     
     - name: Build EXE with PyInstaller
       run: |
@@ -98,43 +94,23 @@ jobs:
     
     - name: Test EXE exists
       run: |
-        if (Test-Path "dist/UniPro_POS_Server.exe") {
+        if (Test-Path "dist/UniPro_POS_Server_GUI.exe") {
             Write-Host "✅ EXE file created successfully!"
-            Get-ChildItem "dist/UniPro_POS_Server.exe" | Format-List
+            Get-ChildItem "dist/UniPro_POS_Server_GUI.exe" | Format-List
         } else {
             Write-Host "❌ EXE file not found!"
+            Write-Host "Contents of dist folder:"
+            if (Test-Path "dist") {
+                Get-ChildItem "dist" | Format-List
+            } else {
+                Write-Host "dist folder does not exist"
+            }
             exit 1
         }
     
     - name: Upload EXE artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: UniPro_POS_Server_Windows
-        path: dist/UniPro_POS_Server.exe
+        path: dist/UniPro_POS_Server_GUI.exe
         retention-days: 30
-    
-    - name: Create Release (if tagged)
-      if: startsWith(github.ref, 'refs/tags/v')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: dist/UniPro_POS_Server.exe
-        name: UniPro POS Server ${{ github.ref_name }}
-        body: |
-          ## UniPro POS Server ${{ github.ref_name }}
-          
-          ### Функции:
-          - TCP сервер на порту 4000 для статусов принтера
-          - UDP сервер на порту 4001 для JSON данных  
-          - TCP сервер на порту 4002 для клиентских подключений
-          - Логирование всех TCP соединений
-          - Обработка продаж, возвратов и отмены операций
-          
-          ### Установка:
-          1. Скачайте UniPro_POS_Server.exe
-          2. Запустите от имени администратора
-          3. Убедитесь что порты 4000, 4001, 4002 не заблокированы
-          
-          ### Логи:
-          Файл tcp_4000.log создается в папке с программой
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
