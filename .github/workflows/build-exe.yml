@@ -23,94 +23,291 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller pystray Pillow
+        # Установка всех необходимых зависимостей
+        pip install pyinstaller
+        pip install pystray
+        pip install Pillow
+        pip install configparser
     
-    - name: Fix encoding in main.py
+    - name: Create icon file
       run: |
-        # Read and fix encoding issues
+        # Создание простой иконки для приложения
+        @'
+import os
+from PIL import Image, ImageDraw, ImageFont
+
+# Создание иконки 256x256
+img = Image.new('RGBA', (256, 256), color=(44, 62, 80, 255))
+draw = ImageDraw.Draw(img)
+
+# Рисование фона
+draw.rectangle([20, 20, 236, 236], fill=(52, 152, 219, 255))
+
+# Добавление текста POS
+try:
+    font = ImageFont.truetype("arial.ttf", 72)
+except:
+    font = ImageFont.load_default()
+
+text = "POS"
+bbox = draw.textbbox((0, 0), text, font=font)
+text_width = bbox[2] - bbox[0]
+text_height = bbox[3] - bbox[1]
+position = ((256 - text_width) // 2, (256 - text_height) // 2)
+draw.text(position, text, fill='white', font=font)
+
+# Сохранение как ICO
+img.save('pos.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])
+print("Icon created successfully!")
+'@ | Out-File -FilePath 'create_icon.py' -Encoding UTF8
+        
+        python create_icon.py
+    
+    - name: Fix encoding and update main.py
+      run: |
+        # Read main.py with UTF8 encoding
         $content = Get-Content -Path 'main.py' -Encoding UTF8 -Raw
         
-        # Replace problematic characters
+        # Fix any encoding issues if they exist
         $content = $content -replace 'Ð', 'О'
         $content = $content -replace 'Ñ', 'п'
         $content = $content -replace '†', 'І'
         $content = $content -replace '®', 'р'
         
-        # Fix log file path for Windows
+        # Ensure proper log file paths for Windows
         $content = $content -replace '/app/tcp_4000\.log', './tcp_4000.log'
+        $content = $content -replace '/tmp/', './'
         
-        # Write back
-        Set-Content -Path 'main.py' -Value $content -Encoding UTF8
+        # Write back with UTF8 encoding
+        Set-Content -Path 'main.py' -Value $content -Encoding UTF8 -NoNewline
+        
+        Write-Host "✅ main.py encoding fixed"
+    
+    - name: Create default config files
+      run: |
+        # Create default config.py if it doesn't exist
+        @'
+# Сетевые настройки
+TCP_STATUS_PORT = 4000    # TCP для статусов от принтера
+UDP_JSON_PORT = 4001      # UDP для JSON данных от принтера
+TCP_CLIENT_PORT = 4002    # TCP для отправки клиентам
+
+# Кодировки
+ENCODINGS = ['utf-8', 'cp1251', 'ascii', 'latin1']
+
+# Индикаторы операций
+SUCCESS_INDICATORS = ["Дякуємо за покупку", "дякуємо за покупку"]
+RETURN_INDICATORS = ["Повернення", "повернення", "Возврат", "возврат"]
+DELETE_INDICATORS = ["Видалено товар:", "видалено товар:"]
+'@ | Out-File -FilePath 'config.py' -Encoding UTF8
+        
+        # Create default INI config
+        @'
+[SETTINGS]
+tcp_status_port = 4000
+udp_json_port = 4001
+tcp_client_port = 4002
+autostart = false
+minimize_to_tray = true
+start_minimized = false
+'@ | Out-File -FilePath 'pos_server_config.ini' -Encoding UTF8
+        
+        Write-Host "✅ Default config files created"
     
     - name: Create PyInstaller spec file
       run: |
         @'
-        # -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
+import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+# Сбор всех необходимых модулей
+hiddenimports = [
+    'pystray',
+    'pystray._win32',
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageDraw',
+    'PIL.ImageFont',
+    'PIL._tkinter_finder',
+    'configparser',
+    'threading',
+    'socket',
+    'json',
+    'winreg',
+    'tkinter',
+    'tkinter.ttk',
+    'tkinter.messagebox',
+    'tkinter.scrolledtext',
+    'tkinter.font',
+    'tkinter.filedialog'
+]
+
+a = Analysis(
+    ['main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[
+        ('config.py', '.'),
+        ('data_processor.py', '.'),
+        ('receipt_formatter.py', '.'),
+        ('pos_server_config.ini', '.'),
+        ('pos.ico', '.')
+    ],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=['matplotlib', 'numpy', 'pandas', 'scipy'],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='UniPro_POS_Server_v26',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,  # False = без консоли (GUI приложение)
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='pos.ico',  # Использование иконки
+    version_file=None,
+)
+'@ | Out-File -FilePath 'pos_server.spec' -Encoding UTF8
         
-        a = Analysis(
-            ['main.py'],
-            pathex=[],
-            binaries=[],
-            datas=[
-                ('config.py', '.'),
-                ('data_processor.py', '.'),
-                ('receipt_formatter.py', '.'),
-            ],
-            hiddenimports=['pystray', 'PIL', 'PIL._tkinter_finder'],
-            hookspath=[],
-            hooksconfig={},
-            runtime_hooks=[],
-            excludes=[],
-            noarchive=False,
-        )
-        
-        pyz = PYZ(a.pure)
-        
-        exe = EXE(
-            pyz,
-            a.scripts,
-            a.binaries,
-            a.datas,
-            [],
-            name='UniPro_POS_Server_GUI',
-            debug=False,
-            bootloader_ignore_signals=False,
-            strip=False,
-            upx=True,
-            upx_exclude=[],
-            runtime_tmpdir=None,
-            console=False,
-            disable_windowed_traceback=False,
-            argv_emulation=False,
-            target_arch=None,
-            codesign_identity=None,
-            entitlements_file=None,
-        )
-        '@ | Out-File -FilePath 'pos_server.spec' -Encoding UTF8
+        Write-Host "✅ PyInstaller spec file created"
     
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller pos_server.spec
+        Write-Host "Starting PyInstaller build..."
+        pyinstaller pos_server.spec --clean
+        Write-Host "✅ Build completed"
     
-    - name: Test EXE exists
+    - name: Test EXE exists and check size
       run: |
-        if (Test-Path "dist/UniPro_POS_Server_GUI.exe") {
+        if (Test-Path "dist/UniPro_POS_Server_v26.exe") {
             Write-Host "✅ EXE file created successfully!"
-            Get-ChildItem "dist/UniPro_POS_Server_GUI.exe" | Format-List
+            $file = Get-Item "dist/UniPro_POS_Server_v26.exe"
+            Write-Host "File: $($file.Name)"
+            Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
+            Write-Host "Created: $($file.CreationTime)"
+            
+            # Проверка размера файла
+            if ($file.Length -lt 1000000) {
+                Write-Host "⚠️ Warning: EXE file seems too small (less than 1MB)"
+            }
         } else {
             Write-Host "❌ EXE file not found!"
             Write-Host "Contents of dist folder:"
             if (Test-Path "dist") {
-                Get-ChildItem "dist" | Format-List
+                Get-ChildItem "dist" -Recurse | Format-Table Name, Length, LastWriteTime
             } else {
                 Write-Host "dist folder does not exist"
             }
+            
+            # Показать логи сборки если есть
+            if (Test-Path "build/*.txt") {
+                Write-Host "Build logs:"
+                Get-Content "build/*.txt" | Select-Object -Last 50
+            }
+            
             exit 1
         }
+    
+    - name: Create portable package
+      run: |
+        # Создание портативной версии с конфигами
+        New-Item -ItemType Directory -Force -Path "portable"
+        
+        # Копирование EXE
+        Copy-Item "dist/UniPro_POS_Server_v26.exe" -Destination "portable/"
+        
+        # Копирование конфигов
+        Copy-Item "config.py" -Destination "portable/"
+        Copy-Item "data_processor.py" -Destination "portable/"
+        Copy-Item "receipt_formatter.py" -Destination "portable/"
+        Copy-Item "pos_server_config.ini" -Destination "portable/"
+        
+        # Создание README
+        @'
+# UniPro POS Server v26
+
+## 🚀 Быстрый старт
+1. Запустите UniPro_POS_Server_v26.exe
+2. Программа запустится с настройками по умолчанию
+3. При необходимости измените порты в настройках
+
+## ⚙️ Настройки портов по умолчанию:
+- TCP Status: 4000
+- UDP JSON: 4001
+- TCP Client: 4002
+
+## 📋 Функции:
+- ✅ Автозапуск сервера
+- ✅ Сворачивание в системный трей
+- ✅ Добавление в автозагрузку Windows
+- ✅ Динамическое изменение портов
+- ✅ Цветные логи и мониторинг
+
+## 📁 Файлы:
+- UniPro_POS_Server_v26.exe - основная программа
+- config.py - конфигурация портов
+- pos_server_config.ini - настройки программы
+- pos_server.log - файл логов
+
+## 🔧 Требования:
+- Windows 7/8/10/11
+- Порты 4000-4002 должны быть свободны
+
+## 📞 Поддержка:
+При возникновении проблем проверьте:
+1. Свободны ли порты
+2. Нет ли блокировки антивирусом
+3. Запущена ли программа от имени администратора (если нужно)
+'@ | Out-File -FilePath "portable/README.txt" -Encoding UTF8
+        
+        Write-Host "✅ Portable package created"
+        
+        # Создание ZIP архива
+        Compress-Archive -Path "portable/*" -DestinationPath "UniPro_POS_Server_v26_Portable.zip" -Force
+        Write-Host "✅ ZIP archive created"
     
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
       with:
-        name: UniPro_POS_Server_Windows
-        path: dist/UniPro_POS_Server_GUI.exe
+        name: UniPro_POS_Server_v26_Windows_EXE
+        path: dist/UniPro_POS_Server_v26.exe
         retention-days: 30
+    
+    - name: Upload Portable Package artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: UniPro_POS_Server_v26_Portable
+        path: UniPro_POS_Server_v26_Portable.zip
+        retention-days: 30
+    
+    - name: Create Release (if tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/UniPro_POS_Server_v26.exe
+          UniPro_POS_Server_v26_Portable.zip
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
