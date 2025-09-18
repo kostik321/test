@@ -1,0 +1,250 @@
+name: Build UniPro POS Server EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install pystray
+        pip install Pillow
+        pip install configparser
+    
+    - name: Create icon file
+      run: |
+        python -c "
+        from PIL import Image, ImageDraw
+        img = Image.new('RGBA', (256, 256), color=(44, 62, 80, 255))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([20, 20, 236, 236], fill=(52, 152, 219, 255))
+        draw.text((85, 100), 'POS', fill='white')
+        img.save('pos.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])
+        print('Icon created successfully!')
+        "
+    
+    - name: Fix encoding in main.py
+      shell: pwsh
+      run: |
+        $content = Get-Content -Path 'main.py' -Encoding UTF8 -Raw
+        $content = $content -replace 'Ð', 'О'
+        $content = $content -replace 'Ñ', 'п'
+        $content = $content -replace '†', 'І'
+        $content = $content -replace '®', 'р'
+        $content = $content -replace '/app/tcp_4000\.log', './tcp_4000.log'
+        $content = $content -replace '/tmp/', './'
+        Set-Content -Path 'main.py' -Value $content -Encoding UTF8 -NoNewline
+        Write-Host "Fixed main.py encoding"
+    
+    - name: Create config.py
+      shell: pwsh
+      run: |
+        $configPy = @"
+        # Сетевые настройки
+        TCP_STATUS_PORT = 4000    # TCP для статусов от принтера
+        UDP_JSON_PORT = 4001      # UDP для JSON данных от принтера
+        TCP_CLIENT_PORT = 4002    # TCP для отправки клиентам
+        
+        # Кодировки
+        ENCODINGS = ['utf-8', 'cp1251', 'ascii', 'latin1']
+        
+        # Индикаторы операций
+        SUCCESS_INDICATORS = ["Дякуємо за покупку", "дякуємо за покупку"]
+        RETURN_INDICATORS = ["Повернення", "повернення", "Возврат", "возврат"]
+        DELETE_INDICATORS = ["Видалено товар:", "видалено товар:"]
+        "@
+        $configPy | Out-File -FilePath 'config.py' -Encoding UTF8
+        Write-Host "Created config.py"
+    
+    - name: Create pos_server_config.ini
+      shell: pwsh
+      run: |
+        $configIni = @"
+        [SETTINGS]
+        tcp_status_port = 4000
+        udp_json_port = 4001
+        tcp_client_port = 4002
+        autostart = false
+        minimize_to_tray = true
+        start_minimized = false
+        "@
+        $configIni | Out-File -FilePath 'pos_server_config.ini' -Encoding UTF8
+        Write-Host "Created pos_server_config.ini"
+    
+    - name: Create PyInstaller spec file
+      shell: pwsh
+      run: |
+        $spec = @"
+        # -*- mode: python ; coding: utf-8 -*-
+        
+        hiddenimports = [
+            'pystray',
+            'pystray._win32',
+            'PIL',
+            'PIL.Image',
+            'PIL.ImageDraw',
+            'PIL._tkinter_finder',
+            'configparser',
+            'threading',
+            'socket',
+            'json',
+            'winreg',
+            'tkinter',
+            'tkinter.ttk',
+            'tkinter.messagebox',
+            'tkinter.scrolledtext',
+            'tkinter.font',
+            'tkinter.filedialog'
+        ]
+        
+        a = Analysis(
+            ['main.py'],
+            pathex=[],
+            binaries=[],
+            datas=[
+                ('config.py', '.'),
+                ('data_processor.py', '.'),
+                ('receipt_formatter.py', '.'),
+                ('pos_server_config.ini', '.'),
+                ('pos.ico', '.')
+            ],
+            hiddenimports=hiddenimports,
+            hookspath=[],
+            hooksconfig={},
+            runtime_hooks=[],
+            excludes=['matplotlib', 'numpy', 'pandas', 'scipy'],
+            noarchive=False,
+        )
+        
+        pyz = PYZ(a.pure)
+        
+        exe = EXE(
+            pyz,
+            a.scripts,
+            a.binaries,
+            a.datas,
+            [],
+            name='UniPro_POS_Server_v26',
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=True,
+            upx_exclude=[],
+            runtime_tmpdir=None,
+            console=False,
+            disable_windowed_traceback=False,
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+            icon='pos.ico',
+        )
+        "@
+        $spec | Out-File -FilePath 'pos_server.spec' -Encoding UTF8
+        Write-Host "Created PyInstaller spec file"
+    
+    - name: Build EXE with PyInstaller
+      run: |
+        Write-Host "Starting PyInstaller build..."
+        pyinstaller pos_server.spec --clean
+        Write-Host "Build completed"
+    
+    - name: Test EXE exists
+      shell: pwsh
+      run: |
+        if (Test-Path "dist/UniPro_POS_Server_v26.exe") {
+            Write-Host "EXE file created successfully!"
+            $file = Get-Item "dist/UniPro_POS_Server_v26.exe"
+            Write-Host "File: $($file.Name)"
+            Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
+        } else {
+            Write-Host "EXE file not found!"
+            if (Test-Path "dist") {
+                Get-ChildItem "dist" -Recurse
+            }
+            exit 1
+        }
+    
+    - name: Create portable package
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "portable"
+        Copy-Item "dist/UniPro_POS_Server_v26.exe" -Destination "portable/"
+        Copy-Item "config.py" -Destination "portable/" -ErrorAction SilentlyContinue
+        Copy-Item "data_processor.py" -Destination "portable/" -ErrorAction SilentlyContinue
+        Copy-Item "receipt_formatter.py" -Destination "portable/" -ErrorAction SilentlyContinue
+        Copy-Item "pos_server_config.ini" -Destination "portable/"
+        
+        $readme = @"
+        UniPro POS Server v26
+        =====================
+        
+        Quick Start:
+        1. Run UniPro_POS_Server_v26.exe
+        2. Configure ports if needed
+        3. Click Start Server
+        
+        Default Ports:
+        - TCP Status: 4000
+        - UDP JSON: 4001
+        - TCP Client: 4002
+        
+        Features:
+        - Auto-start server
+        - System tray support
+        - Windows startup integration
+        - Dynamic port configuration
+        - Color-coded logs
+        
+        Requirements:
+        - Windows 7/8/10/11
+        - Free ports 4000-4002
+        "@
+        $readme | Out-File -FilePath "portable/README.txt" -Encoding UTF8
+        
+        Compress-Archive -Path "portable/*" -DestinationPath "UniPro_POS_Server_v26_Portable.zip" -Force
+        Write-Host "Portable package created"
+    
+    - name: Upload EXE artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: UniPro_POS_Server_v26_Windows_EXE
+        path: dist/UniPro_POS_Server_v26.exe
+        retention-days: 30
+    
+    - name: Upload Portable Package artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: UniPro_POS_Server_v26_Portable
+        path: UniPro_POS_Server_v26_Portable.zip
+        retention-days: 30
+    
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/UniPro_POS_Server_v26.exe
+          UniPro_POS_Server_v26_Portable.zip
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
