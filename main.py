@@ -75,6 +75,7 @@ tcp_socket = None
 cli_socket = None
 data_processor = DataProcessor()
 receipt_formatter = ReceiptFormatter()
+last_total_sent = 0.0  # Для відстеження останньої відправленої суми
 
 # Налаштування за замовчуванням
 DEFAULT_CONFIG = {
@@ -90,7 +91,7 @@ DEFAULT_CONFIG = {
 class POSServerGUI:
     def __init__(self):
         self.root = Tk()
-        self.root.title("UniPro POS Server v27 - Українська версія")
+        self.root.title("UniPro POS Server v28")
         self.root.geometry("950x750")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
@@ -311,28 +312,43 @@ class POSServerGUI:
             except:
                 pass
     
-    def format_product_update(self, action, product_name, product_data=None):
-        """Форматування повідомлення про зміну товару"""
+    def format_product_update(self, action, product_name, product_data=None, old_data=None):
+        """Форматування повідомлення про зміну товару - СПРОЩЕНА ВЕРСІЯ"""
         if action == "ADD":
             qty = product_data.get('fQtty', 0) if product_data else 0
             price = product_data.get('fPrice', 0) if product_data else 0
             sum_val = product_data.get('fSum', 0) if product_data else 0
-            return f"➕ ДОДАНО: {product_name}\n   {qty} x {price:.2f} = {sum_val:.2f} грн\n"
+            # Жовтий колір для додавання
+            return f"\033[93m+ {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\033[0m\n"
         
         elif action == "REMOVE":
-            return f"➖ ВИДАЛЕНО: {product_name}\n"
+            # Червоний колір для видалення
+            qty = old_data.get('fQtty', 0) if old_data else 0
+            price = old_data.get('fPrice', 0) if old_data else 0
+            sum_val = old_data.get('fSum', 0) if old_data else 0
+            return f"\033[91m- {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\033[0m\n"
         
         elif action == "UPDATE":
-            qty = product_data.get('fQtty', 0) if product_data else 0
+            # Для оновлення кількості - показуємо нове значення
+            old_qty = old_data.get('fQtty', 0) if old_data else 0
+            new_qty = product_data.get('fQtty', 0) if product_data else 0
             price = product_data.get('fPrice', 0) if product_data else 0
             sum_val = product_data.get('fSum', 0) if product_data else 0
-            return f"🔄 ОНОВЛЕНО: {product_name}\n   {qty} x {price:.2f} = {sum_val:.2f} грн\n"
+            
+            if new_qty > old_qty:
+                # Збільшення кількості - жовтий
+                diff = new_qty - old_qty
+                return f"\033[93m+ {product_name}  +{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\033[0m\n"
+            else:
+                # Зменшення кількості - червоний
+                diff = old_qty - new_qty
+                return f"\033[91m- {product_name}  -{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\033[0m\n"
         
         return ""
     
     def udp_server(self, port):
-        """UDP сервер для прийому JSON даних з real-time оновленнями"""
-        global products, total, active, prev_products, udp_socket, data_processor
+        """UDP сервер для прийому JSON даних з правильним підрахунком кількості"""
+        global products, total, active, prev_products, udp_socket, data_processor, last_total_sent
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.bind(("0.0.0.0", port))
@@ -347,7 +363,7 @@ class POSServerGUI:
                     cmd = obj.get("cmd", {}).get("cmd", "")
                     
                     if cmd == "clear":
-                        # ВАРІАНТ 2: Відправляємо скасування ТІЛЬКИ якщо є активні товари
+                        # Відправляємо скасування ТІЛЬКИ якщо є активні товари
                         if active and products and len(products) > 0:
                             self.send_to_all_clients("❌ === ОПЕРАЦІЮ СКАСОВАНО ===\n\n")
                             self.log("ТРАНЗАКЦІЮ СКАСОВАНО", "warning")
@@ -359,6 +375,7 @@ class POSServerGUI:
                         prev_products = {}
                         total = 0.0
                         active = False
+                        last_total_sent = 0.0
                         data_processor.reset_transaction()
                     else:
                         # Зберігаємо старий стан
@@ -378,42 +395,55 @@ class POSServerGUI:
                         if products and not active:
                             self.send_to_all_clients("🛒 === ПОЧАТОК ОПЕРАЦІЇ ===\n\n")
                             active = True
+                            last_total_sent = 0.0
                             self.log("НОВА ТРАНЗАКЦІЯ РОЗПОЧАТА", "success")
                         
-                        # REAL-TIME оновлення - відправляємо зміни клієнтам одразу
+                        # REAL-TIME оновлення з правильною обробкою кількості
                         if active:
-                            # Перевіряємо додані товари
+                            changes_made = False
+                            
+                            # Перевіряємо зміни в товарах
                             for name, item in products.items():
                                 if name not in old_products:
                                     # Новий товар додано
                                     msg = self.format_product_update("ADD", name, item)
                                     self.send_to_all_clients(msg)
                                     self.log(f"+ ДОДАНО: {name}", "info")
+                                    changes_made = True
                                     
-                                elif old_products[name].get('fQtty') != item.get('fQtty'):
-                                    # Кількість товару змінилась
-                                    msg = self.format_product_update("UPDATE", name, item)
+                                elif (old_products[name].get('fQtty') != item.get('fQtty') or
+                                      old_products[name].get('fSum') != item.get('fSum')):
+                                    # Кількість або сума змінилась
+                                    msg = self.format_product_update("UPDATE", name, item, old_products[name])
                                     self.send_to_all_clients(msg)
-                                    self.log(f"~ ОНОВЛЕНО: {name}", "info")
+                                    self.log(f"~ ОНОВЛЕНО: {name} (кількість: {item.get('fQtty')})", "info")
+                                    changes_made = True
                             
                             # Перевіряємо видалені товари
                             for name in old_products:
                                 if name not in products:
                                     # Товар видалено
-                                    msg = self.format_product_update("REMOVE", name)
+                                    msg = self.format_product_update("REMOVE", name, None, old_products[name])
                                     self.send_to_all_clients(msg)
                                     self.log(f"- ВИДАЛЕНО: {name}", "warning")
+                                    changes_made = True
                             
-                            # Оновлюємо загальну суму
-                            old_total = total
+                            # Оновлюємо загальну суму ТІЛЬКИ якщо були зміни і сума дійсно змінилась
                             total = obj.get("sum", {}).get("sum", 0)
                             
-                            if total != old_total:
+                            # Відправляємо суму тільки якщо:
+                            # 1. Були зміни в товарах
+                            # 2. Сума дійсно змінилась більш ніж на 0.01
+                            if changes_made and abs(total - last_total_sent) > 0.01:
                                 self.send_to_all_clients(f"💰 СУМА: {total:.2f} грн\n" + "="*30 + "\n")
+                                last_total_sent = total
                                 self.log(f"СУМА ОНОВЛЕНА: {total:.2f} грн")
                         
                         if products:
-                            self.log(f"КОШИК: {len(products)} товарів | Сума: {total} грн")
+                            # Підраховуємо унікальні товари (не кількість одиниць)
+                            unique_items = len(products)
+                            total_units = sum(item.get('fQtty', 0) for item in products.values())
+                            self.log(f"КОШИК: {unique_items} товарів ({total_units} одиниць) | Сума: {total} грн")
                             
                 except socket.timeout:
                     continue
@@ -425,7 +455,7 @@ class POSServerGUI:
     
     def tcp_server(self, port):
         """TCP сервер для прийому статусів від принтера"""
-        global products, total, clients, active, prev_products, tcp_socket, tcp_log_file
+        global products, total, clients, active, prev_products, tcp_socket, tcp_log_file, last_total_sent
         try:
             tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -456,7 +486,7 @@ class POSServerGUI:
     
     def handle_tcp_client(self, client_socket, addr):
         """Обробка TCP клієнта з покращеною перевіркою оплати"""
-        global products, total, active, prev_products, tcp_log_file, receipt_formatter
+        global products, total, active, prev_products, tcp_log_file, receipt_formatter, last_total_sent
         buf = b""
         try:
             while server_running:
@@ -542,6 +572,7 @@ class POSServerGUI:
                         prev_products = {}
                         total = 0.0
                         active = False
+                        last_total_sent = 0.0
                         data_processor.reset_transaction()
                         break
                     
@@ -563,6 +594,7 @@ class POSServerGUI:
                         prev_products = {}
                         total = 0.0
                         active = False
+                        last_total_sent = 0.0
                         data_processor.reset_transaction()
                         break
                     
@@ -602,7 +634,7 @@ class POSServerGUI:
                     
                     # Відправка привітального повідомлення
                     try:
-                        welcome_msg = "🔌 === UniPro POS Server v27 ===\n"
+                        welcome_msg = "🔌 === UniPro POS Server v28 ===\n"
                         welcome_msg += "📡 Real-time оновлення увімкнено\n"
                         welcome_msg += "⏳ Очікування транзакції...\n"
                         welcome_msg += "="*40 + "\n"
@@ -786,7 +818,12 @@ SUCCESS_HEX_PATTERNS = ["c4ffea", "d0b4d18f", "efeeea"]
         
         self.server_status.set("🟢 Працює" if server_running else "⭕ Зупинено")
         self.active_transaction.set("Так" if active else "Ні")
-        self.cart_items.set(str(len(products)))
+        
+        # Правильний підрахунок товарів
+        unique_items = len(products)
+        total_units = sum(item.get('fQtty', 0) for item in products.values())
+        self.cart_items.set(f"{unique_items} ({total_units} од.)")
+        
         self.total_amount.set(f"{total:.2f} грн")
         self.connected_clients.set(str(len(clients)))
         
@@ -1027,7 +1064,7 @@ SUCCESS_HEX_PATTERNS = ["c4ffea", "d0b4d18f", "efeeea"]
         self.root.mainloop()
 
 if __name__ == "__main__":
-    print("UniPro POS Server v27 - Українська версія")
+    print("UniPro POS Server v28")
     print("="*50)
     app = POSServerGUI()
     app.run()
