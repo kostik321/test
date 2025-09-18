@@ -318,14 +318,37 @@ class POSServerGUI:
         if action == "ADD":
             qty = product_data.get('fQtty', 0) if product_data else 0
             price = product_data.get('fPrice', 0) if product_data else 0
-            sum_val
+            sum_val = product_data.get('fSum', 0) if product_data else 0
+            # Просто плюс без зайвого
+            return f"+ {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\n"
+        
+        elif action == "REMOVE":
+            qty = old_data.get('fQtty', 0) if old_data else 0
+            price = old_data.get('fPrice', 0) if old_data else 0  
+            sum_val = old_data.get('fSum', 0) if old_data else 0
+            # Просто мінус
+            return f"- {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\n"
+        
+        elif action == "UPDATE":
+            old_qty = old_data.get('fQtty', 0) if old_data else 0
+            new_qty = product_data.get('fQtty', 0) if product_data else 0
+            price = product_data.get('fPrice', 0) if product_data else 0
+            sum_val = product_data.get('fSum', 0) if product_data else 0
+            
+            if new_qty > old_qty:
+                # Збільшення кількості
+                diff = new_qty - old_qty
+                return f"+ {product_name}  +{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\n"
+            else:
+                # Зменшення кількості
+                diff = old_qty - new_qty
+                return f"- {product_name}  -{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\n"
+        
+        return ""
     
     def udp_server(self, port):
         """UDP сервер для прийому JSON даних з правильним підрахунком кількості"""
-        global products, total, active, prev_products, udp_socket, data_processor, last_total_sent
-        
-        # Час останньої успішної транзакції для ігнорування clear після оплати
-        last_payment_time = 0
+        global products, total, active, prev_products, udp_socket, data_processor, last_total_sent, payment_just_completed
         
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -342,24 +365,24 @@ class POSServerGUI:
                     
                     # Перевіряємо флаг оплати перед обробкою clear
                     if cmd == "clear":
-                        global payment_just_completed
-                        
-                        # Якщо оплата щойно завершена - ігноруємо clear
+                        # Якщо оплата щойно завершена - очищаємо тихо без повідомлення
                         if payment_just_completed:
-                            self.log("Ігноруємо clear - оплата щойно завершена", "info")
+                            self.log("Clear після оплати - очищаємо без повідомлення", "info")
                             products = {}
                             prev_products = {}
                             total = 0.0
                             active = False
                             last_total_sent = 0.0
+                            data_processor.reset_transaction()
+                            payment_just_completed = False  # Скидаємо флаг
                             continue
                             
-                        # НЕ відправляємо скасування якщо транзакція вже завершена або немає товарів
+                        # Відправляємо скасування ТІЛЬКИ якщо є активні товари
                         if active and products and len(products) > 0:
                             self.send_to_all_clients("❌ === ОПЕРАЦІЮ СКАСОВАНО ===\n\n")
                             self.log("ТРАНЗАКЦІЮ СКАСОВАНО", "warning")
                         else:
-                            self.log("Команда clear отримана, але немає активної транзакції або товарів", "info")
+                            self.log("Команда clear отримана, але немає активної транзакції", "info")
                         
                         # Очищаємо дані в будь-якому випадку
                         products = {}
@@ -477,7 +500,7 @@ class POSServerGUI:
     
     def handle_tcp_client(self, client_socket, addr):
         """Обробка TCP клієнта з покращеною перевіркою оплати"""
-        global products, total, active, prev_products, tcp_log_file, receipt_formatter, last_total_sent
+        global products, total, active, prev_products, tcp_log_file, receipt_formatter, last_total_sent, payment_just_completed
         buf = b""
         try:
             while server_running:
@@ -581,10 +604,7 @@ class POSServerGUI:
                         self.log(f"ТРАНЗАКЦІЮ ЗАВЕРШЕНО | Сума: {total} грн", "success")
                         
                         # Встановлюємо флаг що оплата щойно завершена
-                        global payment_just_completed
                         payment_just_completed = True
-                        # Скидаємо флаг через 3 секунди
-                        threading.Timer(3.0, lambda: globals().update(payment_just_completed=False)).start()
                         
                         # Очищення даних
                         products = {}
