@@ -76,6 +76,7 @@ cli_socket = None
 data_processor = DataProcessor()
 receipt_formatter = ReceiptFormatter()
 last_total_sent = 0.0  # Для відстеження останньої відправленої суми
+payment_just_completed = False  # Флаг для ігнорування clear після оплати
 
 # Налаштування за замовчуванням
 DEFAULT_CONFIG = {
@@ -313,42 +314,19 @@ class POSServerGUI:
                 pass
     
     def format_product_update(self, action, product_name, product_data=None, old_data=None):
-        """Форматування повідомлення про зміну товару - СПРОЩЕНА ВЕРСІЯ"""
+        """Форматування повідомлення про зміну товару - БЕЗ ANSI КОДІВ"""
         if action == "ADD":
             qty = product_data.get('fQtty', 0) if product_data else 0
             price = product_data.get('fPrice', 0) if product_data else 0
-            sum_val = product_data.get('fSum', 0) if product_data else 0
-            # Жовтий колір для додавання
-            return f"\033[93m+ {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\033[0m\n"
-        
-        elif action == "REMOVE":
-            # Червоний колір для видалення
-            qty = old_data.get('fQtty', 0) if old_data else 0
-            price = old_data.get('fPrice', 0) if old_data else 0
-            sum_val = old_data.get('fSum', 0) if old_data else 0
-            return f"\033[91m- {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\033[0m\n"
-        
-        elif action == "UPDATE":
-            # Для оновлення кількості - показуємо нове значення
-            old_qty = old_data.get('fQtty', 0) if old_data else 0
-            new_qty = product_data.get('fQtty', 0) if product_data else 0
-            price = product_data.get('fPrice', 0) if product_data else 0
-            sum_val = product_data.get('fSum', 0) if product_data else 0
-            
-            if new_qty > old_qty:
-                # Збільшення кількості - жовтий
-                diff = new_qty - old_qty
-                return f"\033[93m+ {product_name}  +{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\033[0m\n"
-            else:
-                # Зменшення кількості - червоний
-                diff = old_qty - new_qty
-                return f"\033[91m- {product_name}  -{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\033[0m\n"
-        
-        return ""
+            sum_val
     
     def udp_server(self, port):
         """UDP сервер для прийому JSON даних з правильним підрахунком кількості"""
         global products, total, active, prev_products, udp_socket, data_processor, last_total_sent
+        
+        # Час останньої успішної транзакції для ігнорування clear після оплати
+        last_payment_time = 0
+        
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.bind(("0.0.0.0", port))
@@ -362,13 +340,26 @@ class POSServerGUI:
                     obj = json.loads(data)
                     cmd = obj.get("cmd", {}).get("cmd", "")
                     
+                    # Перевіряємо флаг оплати перед обробкою clear
                     if cmd == "clear":
-                        # Відправляємо скасування ТІЛЬКИ якщо є активні товари
+                        global payment_just_completed
+                        
+                        # Якщо оплата щойно завершена - ігноруємо clear
+                        if payment_just_completed:
+                            self.log("Ігноруємо clear - оплата щойно завершена", "info")
+                            products = {}
+                            prev_products = {}
+                            total = 0.0
+                            active = False
+                            last_total_sent = 0.0
+                            continue
+                            
+                        # НЕ відправляємо скасування якщо транзакція вже завершена або немає товарів
                         if active and products and len(products) > 0:
                             self.send_to_all_clients("❌ === ОПЕРАЦІЮ СКАСОВАНО ===\n\n")
                             self.log("ТРАНЗАКЦІЮ СКАСОВАНО", "warning")
                         else:
-                            self.log("Команда clear отримана, але немає активної транзакції", "info")
+                            self.log("Команда clear отримана, але немає активної транзакції або товарів", "info")
                         
                         # Очищаємо дані в будь-якому випадку
                         products = {}
@@ -588,6 +579,12 @@ class POSServerGUI:
                         
                         self.send_to_all_clients(msg)
                         self.log(f"ТРАНЗАКЦІЮ ЗАВЕРШЕНО | Сума: {total} грн", "success")
+                        
+                        # Встановлюємо флаг що оплата щойно завершена
+                        global payment_just_completed
+                        payment_just_completed = True
+                        # Скидаємо флаг через 3 секунди
+                        threading.Timer(3.0, lambda: globals().update(payment_just_completed=False)).start()
                         
                         # Очищення даних
                         products = {}
