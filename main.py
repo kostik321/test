@@ -76,7 +76,6 @@ cli_socket = None
 data_processor = DataProcessor()
 receipt_formatter = ReceiptFormatter()
 last_total_sent = 0.0  # Для відстеження останньої відправленої суми
-payment_just_completed = False  # Флаг для ігнорування clear після оплати
 
 # Налаштування за замовчуванням
 DEFAULT_CONFIG = {
@@ -348,7 +347,7 @@ class POSServerGUI:
     
     def udp_server(self, port):
         """UDP сервер для прийому JSON даних з правильним підрахунком кількості"""
-        global products, total, active, prev_products, udp_socket, data_processor, last_total_sent, payment_just_completed
+        global products, total, active, prev_products, udp_socket, data_processor, last_total_sent
         
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -363,26 +362,14 @@ class POSServerGUI:
                     obj = json.loads(data)
                     cmd = obj.get("cmd", {}).get("cmd", "")
                     
-                    # Перевіряємо флаг оплати перед обробкою clear
                     if cmd == "clear":
-                        # Якщо оплата щойно завершена - очищаємо тихо без повідомлення
-                        if payment_just_completed:
-                            self.log("Clear після оплати - очищаємо без повідомлення", "info")
-                            products = {}
-                            prev_products = {}
-                            total = 0.0
-                            active = False
-                            last_total_sent = 0.0
-                            data_processor.reset_transaction()
-                            payment_just_completed = False  # Скидаємо флаг
-                            continue
-                            
-                        # Відправляємо скасування ТІЛЬКИ якщо є активні товари
-                        if active and products and len(products) > 0:
+                        # Простіша логіка - просто перевіряємо флаг active
+                        if active:
+                            # Відправляємо скасування тільки якщо транзакція активна
                             self.send_to_all_clients("❌ === ОПЕРАЦІЮ СКАСОВАНО ===\n\n")
                             self.log("ТРАНЗАКЦІЮ СКАСОВАНО", "warning")
                         else:
-                            self.log("Команда clear отримана, але немає активної транзакції", "info")
+                            self.log("Clear received - no active transaction", "info")
                         
                         # Очищаємо дані в будь-якому випадку
                         products = {}
@@ -500,7 +487,7 @@ class POSServerGUI:
     
     def handle_tcp_client(self, client_socket, addr):
         """Обробка TCP клієнта з покращеною перевіркою оплати"""
-        global products, total, active, prev_products, tcp_log_file, receipt_formatter, last_total_sent, payment_just_completed
+        global products, total, active, prev_products, tcp_log_file, receipt_formatter, last_total_sent
         buf = b""
         try:
             while server_running:
@@ -603,14 +590,11 @@ class POSServerGUI:
                         self.send_to_all_clients(msg)
                         self.log(f"ТРАНЗАКЦІЮ ЗАВЕРШЕНО | Сума: {total} грн", "success")
                         
-                        # Встановлюємо флаг що оплата щойно завершена
-                        payment_just_completed = True
-                        
-                        # Очищення даних
+                        # ВАЖЛИВО: Очищення даних і встановлення active = False
                         products = {}
                         prev_products = {}
                         total = 0.0
-                        active = False
+                        active = False  # КРИТИЧНО: вимикаємо флаг активності!
                         last_total_sent = 0.0
                         data_processor.reset_transaction()
                         break
