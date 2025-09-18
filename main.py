@@ -50,6 +50,17 @@ except ImportError:
             lines.append("=== СПЛАЧЕНО ===")
             lines.append("Дякуємо за покупку!")
             return "\n".join(lines)
+        
+        @staticmethod
+        def format_return_receipt(products, total):
+            lines = ["=== ПОВЕРНЕННЯ ==="]
+            for product in products.values():
+                lines.append(f"ПОВЕРНУТО: {product.get('fPName', '')}")
+                lines.append(f"Сума: {product.get('fSum', 0):.2f} грн")
+            lines.append("")
+            lines.append(f"СУМА ПОВЕРНЕННЯ: {total:.2f} грн")
+            lines.append("=== ОПЕРАЦІЮ СКАСОВАНО ===")
+            return "\n".join(lines)
 
 # Глобальные переменные
 products = {}
@@ -282,6 +293,327 @@ class POSServerGUI:
         # Запуск обновления статуса
         self.update_status()
     
+    def send_to_all_clients(self, message):
+        """Отправка сообщения всем подключенным клиентам"""
+        global clients
+        disconnected = []
+        for client in clients:
+            try:
+                client.send(message.encode("utf-8"))
+            except:
+                disconnected.append(client)
+        
+        # Удаляем отключенные клиенты
+        for client in disconnected:
+            try:
+                clients.remove(client)
+                client.close()
+            except:
+                pass
+    
+    def format_product_update(self, action, product_name, product_data=None):
+        """Форматирование сообщения об изменении товара"""
+        if action == "ADD":
+            qty = product_data.get('fQtty', 0) if product_data else 0
+            price = product_data.get('fPrice', 0) if product_data else 0
+            sum_val = product_data.get('fSum', 0) if product_data else 0
+            return f"➕ ДОДАНО: {product_name}\n   {qty} x {price:.2f} = {sum_val:.2f} грн\n"
+        
+        elif action == "REMOVE":
+            return f"➖ ВИДАЛЕНО: {product_name}\n"
+        
+        elif action == "UPDATE":
+            qty = product_data.get('fQtty', 0) if product_data else 0
+            price = product_data.get('fPrice', 0) if product_data else 0
+            sum_val = product_data.get('fSum', 0) if product_data else 0
+            return f"🔄 ОНОВЛЕНО: {product_name}\n   {qty} x {price:.2f} = {sum_val:.2f} грн\n"
+        
+        return ""
+    
+    def udp_server(self, port):
+        """UDP сервер для приема JSON данных с real-time обновлениями"""
+        global products, total, active, prev_products, udp_socket, data_processor
+        try:
+            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_socket.bind(("0.0.0.0", port))
+            self.log(f"UDP сервер запущен на порту {port}", "success")
+            
+            while server_running:
+                try:
+                    udp_socket.settimeout(1.0)
+                    data, addr = udp_socket.recvfrom(4096)
+                    
+                    obj = json.loads(data)
+                    cmd = obj.get("cmd", {}).get("cmd", "")
+                    
+                    if cmd == "clear":
+                        # Очистка корзины
+                        if active:
+                            self.send_to_all_clients("❌ === ОПЕРАЦІЮ СКАСОВАНО ===\n\n")
+                            self.log("TRANSACTION CANCELLED", "warning")
+                        products = {}
+                        prev_products = {}
+                        total = 0.0
+                        active = False
+                        data_processor.reset_transaction()
+                    else:
+                        # Сохраняем старое состояние
+                        old_products = dict(prev_products)
+                        
+                        # Обновляем текущие товары
+                        products = {}
+                        prev_products = {}
+                        
+                        for item in obj.get("goods", []):
+                            name = item.get("fPName", "")
+                            if name:
+                                products[name] = item
+                                prev_products[name] = item
+                        
+                        # Если это первый товар - начало транзакции
+                        if products and not active:
+                            self.send_to_all_clients("🛒 === ПОЧАТОК ОПЕРАЦІЇ ===\n\n")
+                            active = True
+                            self.log("NEW TRANSACTION STARTED", "success")
+                        
+                        # REAL-TIME обновления - отправляем изменения клиентам сразу
+                        if active:
+                            # Проверяем добавленные товары
+                            for name, item in products.items():
+                                if name not in old_products:
+                                    # Новый товар добавлен
+                                    msg = self.format_product_update("ADD", name, item)
+                                    self.send_to_all_clients(msg)
+                                    self.log(f"+ ADDED: {name}", "info")
+                                    
+                                elif old_products[name].get('fQtty') != item.get('fQtty'):
+                                    # Количество товара изменилось
+                                    msg = self.format_product_update("UPDATE", name, item)
+                                    self.send_to_all_clients(msg)
+                                    self.log(f"~ UPDATED: {name}", "info")
+                            
+                            # Проверяем удаленные товары
+                            for name in old_products:
+                                if name not in products:
+                                    # Товар удален
+                                    msg = self.format_product_update("REMOVE", name)
+                                    self.send_to_all_clients(msg)
+                                    self.log(f"- REMOVED: {name}", "warning")
+                            
+                            # Обновляем общую сумму
+                            old_total = total
+                            total = obj.get("sum", {}).get("sum", 0)
+                            
+                            if total != old_total:
+                                self.send_to_all_clients(f"💰 СУМА: {total:.2f} грн\n" + "="*30 + "\n")
+                                self.log(f"TOTAL UPDATED: {total:.2f} UAH")
+                        
+                        if products:
+                            self.log(f"CART: {len(products)} items | Total: {total} UAH")
+                            
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if server_running:
+                        self.log(f"UDP Error: {e}", "error")
+        except Exception as e:
+            self.log(f"UDP Server Error: {e}", "error")
+    
+    def tcp_server(self, port):
+        """TCP сервер для приема статусов от принтера"""
+        global products, total, clients, active, prev_products, tcp_socket, tcp_log_file
+        try:
+            tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            tcp_socket.bind(("0.0.0.0", port))
+            tcp_socket.listen(5)
+            self.log(f"TCP сервер запущен на порту {port}", "success")
+            
+            # Открытие файла логов
+            try:
+                tcp_log_file = open("tcp_server.log", "a", buffering=1, encoding="utf-8")
+                self.log("TCP log file opened: tcp_server.log")
+            except:
+                self.log("Warning: Could not open TCP log file", "warning")
+            
+            while server_running:
+                try:
+                    tcp_socket.settimeout(1.0)
+                    c, a = tcp_socket.accept()
+                    self.log(f"TCP connection from {a}")
+                    threading.Thread(target=self.handle_tcp_client, args=(c, a), daemon=True).start()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if server_running:
+                        self.log(f"TCP Accept Error: {e}", "error")
+        except Exception as e:
+            self.log(f"TCP Server Error: {e}", "error")
+    
+    def handle_tcp_client(self, client_socket, addr):
+        """Обработка TCP клиента с улучшенной проверкой оплаты"""
+        global products, total, active, prev_products, tcp_log_file, receipt_formatter
+        buf = b""
+        try:
+            while server_running:
+                try:
+                    client_socket.settimeout(1.0)
+                    d = client_socket.recv(1024)
+                    if not d:
+                        break
+                    buf += d
+                    
+                    # Детальное логирование
+                    if tcp_log_file:
+                        tcp_log_file.write("\n" + "="*60 + "\n")
+                        tcp_log_file.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] From: {addr}\n")
+                        tcp_log_file.write(f"RAW bytes ({len(d)}): {d}\n")
+                        tcp_log_file.write(f"HEX: {d.hex()}\n")
+                        
+                        # Пробуем разные декодировки
+                        for encoding in ['cp1251', 'utf-8', 'cp1252', 'iso-8859-5']:
+                            try:
+                                decoded = d.decode(encoding, errors='ignore')
+                                tcp_log_file.write(f"{encoding.upper()}: {decoded}\n")
+                            except:
+                                pass
+                        tcp_log_file.flush()
+                    
+                    # Пробуем декодировать с разными кодировками
+                    text = ""
+                    for encoding in ['cp1251', 'utf-8', 'cp1252']:
+                        try:
+                            text = buf.decode(encoding, errors='ignore')
+                            break
+                        except:
+                            continue
+                    
+                    text_lower = text.lower()
+                    
+                    # УЛУЧШЕННАЯ ПРОВЕРКА УСПЕШНОЙ ОПЛАТЫ
+                    success_patterns = [
+                        "дякуємо за покупку",
+                        "дякуємо за покупку",  # с другой е
+                        "дякуемо за покупку",  # без диакритики
+                        "покупку",  # частичное совпадение
+                        "сплачено",
+                        "оплачено"
+                    ]
+                    
+                    payment_confirmed = False
+                    for pattern in success_patterns:
+                        if pattern in text_lower:
+                            payment_confirmed = True
+                            self.log(f"Payment pattern matched: '{pattern}'", "info")
+                            break
+                    
+                    # Проверка по HEX паттернам
+                    hex_data = buf.hex().lower()
+                    hex_patterns = [
+                        "c4ffea",  # "Дяк" в CP1251
+                        "d0b4d18f",  # "Дя" в UTF-8
+                        "efeeea",  # "пок" в CP1251
+                    ]
+                    
+                    for hex_pattern in hex_patterns:
+                        if hex_pattern in hex_data:
+                            payment_confirmed = True
+                            self.log(f"Payment HEX pattern matched: {hex_pattern}", "info")
+                            break
+                    
+                    # Проверка возврата
+                    if "повернення" in text_lower or "возврат" in text_lower:
+                        self.log("RETURN OPERATION DETECTED", "warning")
+                        if products:
+                            msg = receipt_formatter.format_return_receipt(products, total)
+                            self.send_to_all_clients(msg)
+                            self.log(f"RETURN COMPLETE | Total: {total} UAH", "warning")
+                        else:
+                            msg = "=== ПОВЕРНЕННЯ ===\nПовернення виконано\n=== ОПЕРАЦІЮ СКАСОВАНО ===\n"
+                            self.send_to_all_clients(msg)
+                            self.log("RETURN WITHOUT PRODUCTS", "warning")
+                        
+                        # Очистка данных
+                        products = {}
+                        prev_products = {}
+                        total = 0.0
+                        active = False
+                        data_processor.reset_transaction()
+                        break
+                    
+                    # Проверка успешной оплаты
+                    elif payment_confirmed and products:
+                        self.log("PAYMENT CONFIRMED - Transaction complete!", "success")
+                        self.log(f"Matched text: '{text[:100]}'", "info")
+                        
+                        # Отправляем финальный чек
+                        msg = "\n" + "="*40 + "\n"
+                        msg += receipt_formatter.format_success_receipt(products, total)
+                        msg += "\n" + "="*40 + "\n"
+                        
+                        self.send_to_all_clients(msg)
+                        self.log(f"TRANSACTION COMPLETE | Total: {total} UAH", "success")
+                        
+                        # Очистка данных
+                        products = {}
+                        prev_products = {}
+                        total = 0.0
+                        active = False
+                        data_processor.reset_transaction()
+                        break
+                    
+                    # Логируем, если не распознали
+                    elif len(buf) > 0:
+                        self.log(f"TCP data not recognized: {text[:50]}", "warning")
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if server_running:
+                        self.log(f"TCP Client Error: {e}", "error")
+                    break
+                    
+        except Exception as e:
+            self.log(f"TCP Handle Error: {e}", "error")
+        finally:
+            client_socket.close()
+            self.log(f"TCP connection closed: {addr}")
+    
+    def client_server(self, port):
+        """TCP сервер для клиентских подключений"""
+        global clients, cli_socket
+        try:
+            cli_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cli_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            cli_socket.bind(("0.0.0.0", port))
+            cli_socket.listen(10)
+            self.log(f"Client сервер запущен на порту {port}", "success")
+            
+            while server_running:
+                try:
+                    cli_socket.settimeout(1.0)
+                    c, a = cli_socket.accept()
+                    self.log(f"CLIENT CONNECTED: {a}", "info")
+                    clients.append(c)
+                    
+                    # Отправка приветственного сообщения
+                    try:
+                        welcome_msg = "🔌 === UniPro POS Server v26 ===\n"
+                        welcome_msg += "📡 Real-time updates enabled\n"
+                        welcome_msg += "⏳ Waiting for transaction...\n"
+                        welcome_msg += "="*40 + "\n"
+                        c.send(welcome_msg.encode("utf-8"))
+                    except:
+                        pass
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if server_running:
+                        self.log(f"Client Server Error: {e}", "error")
+        except Exception as e:
+            self.log(f"Client Server Error: {e}", "error")
+    
     def apply_ports(self):
         """Применение измененных портов и обновление config.py"""
         try:
@@ -327,9 +659,12 @@ TCP_CLIENT_PORT = {tcp_client}    # TCP для отправки клиентам
 ENCODINGS = ['utf-8', 'cp1251', 'ascii', 'latin1']
 
 # Индикаторы операций
-SUCCESS_INDICATORS = ["Дякуємо за покупку", "дякуємо за покупку"]
+SUCCESS_INDICATORS = ["Дякуємо за покупку", "дякуємо за покупку", "покупку", "сплачено"]
 RETURN_INDICATORS = ["Повернення", "повернення", "Возврат", "возврат"]
 DELETE_INDICATORS = ["Видалено товар:", "видалено товар:"]
+
+# HEX паттерны для надежного определения
+SUCCESS_HEX_PATTERNS = ["c4ffea", "d0b4d18f", "efeeea"]
 '''
         
         try:
@@ -350,6 +685,53 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
             messagebox.showinfo("Успех", "config.py успешно экспортирован!")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось экспортировать config.py: {e}")
+    
+    def test_udp(self):
+        """Отправка тестового UDP сообщения"""
+        test_data = {
+            "cmd": {"cmd": ""},
+            "goods": [
+                {
+                    "fPName": "Тестовый товар 1",
+                    "fPrice": 15.50,
+                    "fQtty": 2,
+                    "fSum": 31.00
+                },
+                {
+                    "fPName": "Тестовый товар 2",
+                    "fPrice": 25.00,
+                    "fQtty": 1,
+                    "fSum": 25.00
+                }
+            ],
+            "sum": {"sum": 56.00}
+        }
+        
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test_socket.sendto(json.dumps(test_data).encode(), ('localhost', int(self.udp_json_port.get())))
+            test_socket.close()
+            self.log("Тестовое UDP сообщение отправлено", "info")
+            messagebox.showinfo("Тест UDP", "Тестовое сообщение отправлено успешно!")
+        except Exception as e:
+            self.log(f"Ошибка отправки тестового сообщения: {e}", "error")
+            messagebox.showerror("Ошибка", f"Не удалось отправить тестовое сообщение: {e}")
+    
+    def test_tcp(self):
+        """Тестирование TCP соединения"""
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.settimeout(2)
+            test_socket.connect(('localhost', int(self.tcp_status_port.get())))
+            test_socket.send("Дякуємо за покупку".encode('cp1251'))
+            test_socket.close()
+            self.log("Тестовое TCP сообщение отправлено", "info")
+            messagebox.showinfo("Тест TCP", "TCP тест выполнен успешно!")
+        except Exception as e:
+            self.log(f"Ошибка TCP теста: {e}", "error")
+            messagebox.showerror("Ошибка", f"TCP тест не удался: {e}")
+    
+    # ... остальные методы остаются без изменений ...
     
     def check_windows_startup(self):
         """Проверка наличия в автозагрузке Windows"""
@@ -377,7 +759,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
                                0, winreg.KEY_SET_VALUE)
             
             if self.in_startup.get():
-                # Добавить в автозагрузку
                 exe_path = os.path.abspath(sys.argv[0])
                 if exe_path.endswith('.py'):
                     exe_path = f'"{sys.executable}" "{exe_path}"'
@@ -386,7 +767,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
                 winreg.SetValueEx(key, "UniProPOSServer", 0, winreg.REG_SZ, exe_path)
                 messagebox.showinfo("Успех", "Программа добавлена в автозагрузку Windows")
             else:
-                # Удалить из автозагрузки
                 try:
                     winreg.DeleteValue(key, "UniProPOSServer")
                     messagebox.showinfo("Успех", "Программа удалена из автозагрузки Windows")
@@ -434,31 +814,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         # Повторный вызов через 1 секунду
         self.root.after(1000, self.update_status)
     
-    def setup_tray(self):
-        if not TRAY_AVAILABLE:
-            return
-            
-        # Создание иконки
-        def create_image():
-            width = 64
-            height = 64
-            image = Image.new('RGB', (width, height), color='#2c3e50')
-            dc = ImageDraw.Draw(image)
-            dc.rectangle([10, 10, width-10, height-10], fill='#3498db')
-            dc.text((20, 20), "POS", fill='white')
-            return image
-        
-        # Меню трея
-        menu = pystray.Menu(
-            item('Показать', self.show_window, default=True),
-            item('Запустить сервер', lambda: self.root.after(0, self.start_server)),
-            item('Остановить сервер', lambda: self.root.after(0, self.stop_server)),
-            pystray.Menu.SEPARATOR,
-            item('Выход', self.quit_from_tray)
-        )
-        
-        self.tray_icon = pystray.Icon("pos_server", create_image(), "UniPro POS Server", menu)
-    
     def start_server(self):
         global server_running
         if server_running:
@@ -466,16 +821,13 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
             return
             
         try:
-            # Получение портов
             tcp_status = int(self.tcp_status_port.get())
             udp_json = int(self.udp_json_port.get())
             tcp_client = int(self.tcp_client_port.get())
             
-            # Валидация
             if not all(1024 <= p <= 65535 for p in [tcp_status, udp_json, tcp_client]):
                 raise ValueError("Порты должны быть в диапазоне 1024-65535")
             
-            # Запуск серверов в отдельных потоках
             threading.Thread(target=self.udp_server, args=(udp_json,), daemon=True).start()
             threading.Thread(target=self.tcp_server, args=(tcp_status,), daemon=True).start()
             threading.Thread(target=self.client_server, args=(tcp_client,), daemon=True).start()
@@ -495,7 +847,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         global server_running, udp_socket, tcp_socket, cli_socket, tcp_log_file, clients
         server_running = False
         
-        # Закрытие всех клиентских соединений
         for client in clients:
             try:
                 client.close()
@@ -503,7 +854,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
                 pass
         clients = []
         
-        # Закрытие сокетов
         try:
             if udp_socket:
                 udp_socket.close()
@@ -525,57 +875,11 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         self.start_button.config(state=NORMAL)
         self.stop_button.config(state=DISABLED)
     
-    def test_udp(self):
-        """Отправка тестового UDP сообщения"""
-        test_data = {
-            "cmd": {"cmd": ""},
-            "goods": [
-                {
-                    "fPName": "Тестовый товар 1",
-                    "fPrice": 15.50,
-                    "fQtty": 2,
-                    "fSum": 31.00
-                },
-                {
-                    "fPName": "Тестовый товар 2",
-                    "fPrice": 25.00,
-                    "fQtty": 1,
-                    "fSum": 25.00
-                }
-            ],
-            "sum": {"sum": 56.00}
-        }
-        
-        try:
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            test_socket.sendto(json.dumps(test_data).encode(), ('localhost', int(self.udp_json_port.get())))
-            test_socket.close()
-            self.log("Тестовое UDP сообщение отправлено", "info")
-            messagebox.showinfo("Тест UDP", "Тестовое сообщение отправлено успешно!")
-        except Exception as e:
-            self.log(f"Ошибка отправки тестового сообщения: {e}", "error")
-            messagebox.showerror("Ошибка", f"Не удалось отправить тестовое сообщение: {e}")
-    
-    def test_tcp(self):
-        """Тестирование TCP соединения"""
-        try:
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.settimeout(2)
-            test_socket.connect(('localhost', int(self.tcp_status_port.get())))
-            test_socket.send("Дякуємо за покупку".encode('cp1251'))
-            test_socket.close()
-            self.log("Тестовое TCP сообщение отправлено", "info")
-            messagebox.showinfo("Тест TCP", "TCP тест выполнен успешно!")
-        except Exception as e:
-            self.log(f"Ошибка TCP теста: {e}", "error")
-            messagebox.showerror("Ошибка", f"TCP тест не удался: {e}")
-    
     def log(self, message, tag=None):
         """Улучшенное логирование с тегами"""
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         log_message = f"{timestamp} {message}\n"
         
-        # Добавление в GUI
         try:
             if hasattr(self, 'log_text') and self.log_text.winfo_exists():
                 self.log_text.insert(END, log_message, tag)
@@ -584,13 +888,11 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         except:
             pass
         
-        # Печать в консоль
         try:
             print(log_message.strip())
         except:
             pass
         
-        # Сохранение в файл
         try:
             with open("pos_server.log", "a", encoding="utf-8") as f:
                 f.write(log_message)
@@ -602,7 +904,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         self.log("Логи очищены", "info")
     
     def clear_all_logs(self):
-        """Очистка всех файлов логов"""
         if messagebox.askyesno("Подтверждение", "Очистить все файлы логов?"):
             self.clear_logs()
             try:
@@ -628,7 +929,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
                 messagebox.showerror("Ошибка", f"Не удалось сохранить логи: {e}")
     
     def save_config(self):
-        """Сохранение конфигурации в INI файл"""
         config = configparser.ConfigParser()
         config['SETTINGS'] = {
             'tcp_status_port': self.tcp_status_port.get(),
@@ -647,7 +947,6 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
             messagebox.showerror("Ошибка", f"Не удалось сохранить конфигурацию: {e}")
     
     def load_config(self):
-        """Загрузка конфигурации из INI файла"""
         config = configparser.ConfigParser()
         try:
             config.read('pos_server_config.ini')
@@ -663,8 +962,30 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         except Exception as e:
             self.log(f"Ошибка загрузки конфигурации: {e}", "warning")
     
+    def setup_tray(self):
+        if not TRAY_AVAILABLE:
+            return
+            
+        def create_image():
+            width = 64
+            height = 64
+            image = Image.new('RGB', (width, height), color='#2c3e50')
+            dc = ImageDraw.Draw(image)
+            dc.rectangle([10, 10, width-10, height-10], fill='#3498db')
+            dc.text((20, 20), "POS", fill='white')
+            return image
+        
+        menu = pystray.Menu(
+            item('Показать', self.show_window, default=True),
+            item('Запустить сервер', lambda: self.root.after(0, self.start_server)),
+            item('Остановить сервер', lambda: self.root.after(0, self.stop_server)),
+            pystray.Menu.SEPARATOR,
+            item('Выход', self.quit_from_tray)
+        )
+        
+        self.tray_icon = pystray.Icon("pos_server", create_image(), "UniPro POS Server", menu)
+    
     def on_closing(self):
-        """Обработка закрытия окна"""
         if self.minimize_to_tray.get() and TRAY_AVAILABLE:
             self.hide_window()
         else:
@@ -675,14 +996,12 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
                 self.quit_application()
     
     def hide_window(self):
-        """Скрытие окна в трей"""
         self.root.withdraw()
         if self.tray_icon and not self.tray_icon.visible:
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
         self.log("Программа свернута в трей", "info")
     
     def show_window(self, icon=None, item=None):
-        """Показ окна из трея"""
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
@@ -690,12 +1009,10 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
             self.tray_icon.stop()
     
     def quit_from_tray(self, icon, item):
-        """Выход из трея"""
         icon.stop()
         self.root.after(0, self.quit_application)
     
     def quit_application(self):
-        """Полный выход из приложения"""
         self.stop_server()
         if self.tray_icon:
             self.tray_icon.stop()
@@ -704,229 +1021,11 @@ DELETE_INDICATORS = ["Видалено товар:", "видалено това�
         self.root.destroy()
         sys.exit(0)
     
-    def udp_server(self, port):
-        """UDP сервер для приема JSON данных"""
-        global products, total, active, prev_products, udp_socket, data_processor
-        try:
-            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            udp_socket.bind(("0.0.0.0", port))
-            self.log(f"UDP сервер запущен на порту {port}", "success")
-            
-            while server_running:
-                try:
-                    udp_socket.settimeout(1.0)
-                    data, addr = udp_socket.recvfrom(4096)
-                    
-                    obj = json.loads(data)
-                    cmd = obj.get("cmd", {}).get("cmd", "")
-                    
-                    if cmd == "clear":
-                        if active:
-                            for c in clients:
-                                try:
-                                    c.send("=== ОПЕРАЦІЮ СКАСОВАНО ===\n".encode("utf-8"))
-                                except:
-                                    pass
-                            self.log("TRANSACTION CANCELLED", "warning")
-                        products = {}
-                        prev_products = {}
-                        total = 0.0
-                        active = False
-                        data_processor.reset_transaction()
-                    else:
-                        old = dict(prev_products)
-                        products = {}
-                        prev_products = {}
-                        
-                        for item in obj.get("goods", []):
-                            name = item.get("fPName", "")
-                            if name:
-                                products[name] = item
-                                prev_products[name] = item
-                        
-                        if products and not active:
-                            for c in clients:
-                                try:
-                                    c.send("ПОЧАТОК ОПЕРАЦІЇ\n".encode("utf-8"))
-                                except:
-                                    pass
-                            active = True
-                            self.log("NEW TRANSACTION STARTED", "success")
-                        
-                        for name, item in products.items():
-                            if name not in old:
-                                price = item.get("fPrice", 0)
-                                qty = item.get("fQtty", 0)
-                                self.log(f"+ ADDED: {name} | {qty} x {price} UAH", "info")
-                        
-                        for name in old:
-                            if name not in products:
-                                self.log(f"- REMOVED: {name}", "warning")
-                        
-                        total = obj.get("sum", {}).get("sum", 0)
-                        if products:
-                            self.log(f"CART: {len(products)} items | Total: {total} UAH")
-                            
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if server_running:
-                        self.log(f"UDP Error: {e}", "error")
-        except Exception as e:
-            self.log(f"UDP Server Error: {e}", "error")
-    
-    def tcp_server(self, port):
-        """TCP сервер для приема статусов от принтера"""
-        global products, total, clients, active, prev_products, tcp_socket, tcp_log_file
-        try:
-            tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            tcp_socket.bind(("0.0.0.0", port))
-            tcp_socket.listen(5)
-            self.log(f"TCP сервер запущен на порту {port}", "success")
-            
-            # Открытие файла логов
-            try:
-                tcp_log_file = open("tcp_server.log", "a", buffering=1, encoding="utf-8")
-                self.log("TCP log file opened: tcp_server.log")
-            except:
-                self.log("Warning: Could not open TCP log file", "warning")
-            
-            while server_running:
-                try:
-                    tcp_socket.settimeout(1.0)
-                    c, a = tcp_socket.accept()
-                    self.log(f"TCP connection from {a}")
-                    threading.Thread(target=self.handle_tcp_client, args=(c, a), daemon=True).start()
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if server_running:
-                        self.log(f"TCP Accept Error: {e}", "error")
-        except Exception as e:
-            self.log(f"TCP Server Error: {e}", "error")
-    
-    def handle_tcp_client(self, client_socket, addr):
-        """Обработка TCP клиента"""
-        global products, total, active, prev_products, tcp_log_file, receipt_formatter
-        buf = b""
-        try:
-            while server_running:
-                try:
-                    client_socket.settimeout(1.0)
-                    d = client_socket.recv(1024)
-                    if not d:
-                        break
-                    buf += d
-                    
-                    # Логирование в файл
-                    if tcp_log_file:
-                        tcp_log_file.write("\n" + "="*60 + "\n")
-                        tcp_log_file.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] From: {addr}\n")
-                        tcp_log_file.write(f"HEX: {d.hex()}\n")
-                        tcp_log_file.write(f"CP1251: {d.decode('cp1251', errors='ignore')}\n")
-                        tcp_log_file.write(f"UTF-8: {d.decode('utf-8', errors='ignore')}\n")
-                        tcp_log_file.flush()
-                    
-                    text = buf.decode("cp1251", errors="ignore")
-                    
-                    # Проверка возврата
-                    if "повернення" in text.lower() or "возврат" in text.lower():
-                        self.log("RETURN OPERATION DETECTED", "warning")
-                        if products:
-                            msg = receipt_formatter.format_return_receipt(products, total)
-                            
-                            for cl in clients:
-                                try:
-                                    cl.send(msg.encode("utf-8"))
-                                except:
-                                    pass
-                            
-                            self.log(f"RETURN COMPLETE | Total: {total} UAH", "warning")
-                        else:
-                            msg = "=== ПОВЕРНЕННЯ ===\nПовернення виконано\n=== ОПЕРАЦІЮ СКАСОВАНО ===\n"
-                            for cl in clients:
-                                try:
-                                    cl.send(msg.encode("utf-8"))
-                                except:
-                                    pass
-                            self.log("RETURN WITHOUT PRODUCTS", "warning")
-                        
-                        products = {}
-                        prev_products = {}
-                        total = 0.0
-                        active = False
-                        data_processor.reset_transaction()
-                        break
-                    
-                    # Проверка оплаты
-                    elif "покупку" in text.lower() and products:
-                        self.log("PAYMENT CONFIRMED", "success")
-                        msg = receipt_formatter.format_success_receipt(products, total)
-                        
-                        for cl in clients:
-                            try:
-                                cl.send(msg.encode("utf-8"))
-                            except:
-                                pass
-                        
-                        self.log(f"TRANSACTION COMPLETE | Total: {total} UAH", "success")
-                        products = {}
-                        prev_products = {}
-                        total = 0.0
-                        active = False
-                        data_processor.reset_transaction()
-                        break
-                        
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if server_running:
-                        self.log(f"TCP Client Error: {e}", "error")
-                    break
-                    
-        except Exception as e:
-            self.log(f"TCP Handle Error: {e}", "error")
-        finally:
-            client_socket.close()
-    
-    def client_server(self, port):
-        """TCP сервер для клиентских подключений"""
-        global clients, cli_socket
-        try:
-            cli_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            cli_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            cli_socket.bind(("0.0.0.0", port))
-            cli_socket.listen(10)
-            self.log(f"Client сервер запущен на порту {port}", "success")
-            
-            while server_running:
-                try:
-                    cli_socket.settimeout(1.0)
-                    c, a = cli_socket.accept()
-                    self.log(f"CLIENT CONNECTED: {a}", "info")
-                    clients.append(c)
-                    
-                    # Отправка приветственного сообщения
-                    try:
-                        c.send("=== UniPro POS Server Connected ===\n".encode("utf-8"))
-                    except:
-                        pass
-                        
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if server_running:
-                        self.log(f"Client Server Error: {e}", "error")
-        except Exception as e:
-            self.log(f"Client Server Error: {e}", "error")
-    
     def run(self):
-        """Запуск главного окна"""
         self.root.mainloop()
 
 if __name__ == "__main__":
-    print("UniPro POS Server v26 with Advanced GUI")
+    print("UniPro POS Server v26 with Real-Time Updates")
     print("="*50)
     app = POSServerGUI()
     app.run()
