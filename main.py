@@ -326,7 +326,7 @@ class POSServerGUI:
             price = old_data.get('fPrice', 0) if old_data else 0  
             sum_val = old_data.get('fSum', 0) if old_data else 0
             # Просто мінус
-            return f"- {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\n"
+            return f"❌ {product_name}  {qty}x{price:.2f} = {sum_val:.2f} грн\n"
         
         elif action == "UPDATE":
             old_qty = old_data.get('fQtty', 0) if old_data else 0
@@ -341,7 +341,7 @@ class POSServerGUI:
             else:
                 # Зменшення кількості
                 diff = old_qty - new_qty
-                return f"- {product_name}  -{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\n"
+                return f"❌ {product_name}  -{diff} (всього: {new_qty}x{price:.2f} = {sum_val:.2f} грн)\n"
         
         return ""
     
@@ -438,7 +438,7 @@ class POSServerGUI:
                                     # Товар видалено
                                     msg = self.format_product_update("REMOVE", name, None, old_products[name])
                                     self.send_to_all_clients(msg)
-                                    self.log(f"- ВИДАЛЕНО: {name}", "warning")
+                                    self.log(f"❌ ВИДАЛЕНО: {name}", "warning")
                                     changes_made = True
                             
                             # Оновлюємо загальну суму ТІЛЬКИ якщо були зміни і сума дійсно змінилась
