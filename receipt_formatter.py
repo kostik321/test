@@ -7,15 +7,16 @@ class ReceiptFormatter:
         for product in products.values():
             # Використовуємо правильні ключі з JSON
             name = product.get('fPName', 'Невідомий товар')
-            qty = product.get('fQtty', 0)
+            original_qty = product.get('fQtty', 1)
             price = product.get('fPrice', 0)
             sum_val = product.get('fSum', 0)
             
             # ВАЖЛИВО: Вираховуємо реальну кількість через ділення
             if price > 0:
-                real_qty = round(sum_val / price)  # Ділимо суму на ціну
+                # Використовуємо int() для точного цілочисельного результату
+                real_qty = int(sum_val / price + 0.5)  # Ділимо суму на ціну з округленням
             else:
-                real_qty = qty
+                real_qty = original_qty
             
             lines.append(name)
             lines.append(f"{real_qty} x {price:.2f} = {sum_val:.2f} грн")
